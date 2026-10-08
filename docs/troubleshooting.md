@@ -37,6 +37,21 @@ uci commit dhcp
 
 本项目不修改 OpenClash 规则、Tailscale DNS 偏好或全局路由策略。
 
+## 共享 /64 下的 IPv6 回程
+
+若路由器 IPv6 正常、下游 IPv6 超时，并且客户端地址与 WAN 共用 `/64`，检查客户端回程是否误指向 WAN。NAT66 使用池地址接收回包，可能不再触发上级对客户端地址的 NDP 查询；原有 LAN `/128` 路由老化或客户端换临时地址后，main 表可能把还原后的包送回 WAN。旧版健康检查只确认地址和 NAT 表存在，无法发现这个故障。
+
+修复版维护表 40960 和优先级 32000 的 WAN 入站回程策略，不需要客户端静态地址。检查：
+
+```sh
+ip -6 rule show priority 32000
+ip -6 route show table 40960
+# 使用真实客户端地址与 WAN 设备：
+ip -6 route get CLIENT_IPV6 from REMOTE_IPV6 iif WAN_DEVICE
+```
+
+该查询应指向 LAN 设备。NDP relay 可能为 WAN 池别名建立大量 LAN 代理项并产生发送缓冲区警告；警告本身不能单独证明所有超时的原因。先检查回程，而不是反复重扫地址池。原代理规则、客户端 RA/DHCPv6 模式无需为这项修复修改。
+
 ## MiniEAP 在系统日志中看不到
 
 ```sh

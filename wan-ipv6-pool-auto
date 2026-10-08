@@ -38,6 +38,12 @@ snapshot() {
 clear_pool() {
     nft delete table ip6 awp6_auto 2>/dev/null || :
     nft delete table ip6 awp6_probe 2>/dev/null || :
+    if [ -f "$STATE/return-route-owned" ]; then
+        read -r rd rl rp < "$STATE/return-route-owned"
+        ip -6 rule del priority 32000 iif "$rd" to "$rp" lookup 40960 2>/dev/null || :
+        ip -6 route del "$rp" dev "$rl" table 40960 metric 4096 2>/dev/null || :
+        rm -f "$STATE/return-route-owned"
+    fi
     if [ -f "$STATE/route-owned" ]; then
         read -r rd rl rg < "$STATE/route-owned"
         ip -6 route del default from "$rl" via "$rg" dev "$rd" metric 4096 2>/dev/null || :
@@ -54,10 +60,23 @@ install_rules() {
     nft -c -f "$STATE/rules.nft" && nft -f "$STATE/rules.nft"
 }
 ensure_route() {
-    ip -6 route show default from "$LAN_CIDR" dev "$DEV" | grep -q "via $GW .*metric 4096" && return 0
     # 仅为 LAN ULA 提供出口；原 WAN 和代理策略路由不变。
-    printf '%s %s %s\n' "$DEV" "$LAN_CIDR" "$GW" > "$STATE/route-owned"
-    ip -6 route add default from "$LAN_CIDR" via "$GW" dev "$DEV" metric 4096
+    if ! ip -6 route show default from "$LAN_CIDR" dev "$DEV" | grep -q "via $GW .*metric 4096"; then
+        printf '%s %s %s\n' "$DEV" "$LAN_CIDR" "$GW" > "$STATE/route-owned"
+        ip -6 route add default from "$LAN_CIDR" via "$GW" dev "$DEV" metric 4096 || return 1
+    fi
+    if [ ! -f "$STATE/return-route-owned" ]; then
+        if [ -n "$(ip -6 route show table 40960 2>/dev/null)" ] || [ -n "$(ip -6 rule show priority 32000)" ]; then
+            log 'IPv6 回程路由表 40960 或优先级 32000 已被占用，停止构建。' err
+            return 1
+        fi
+        printf '%s %s %s\n' "$DEV" "$LANDEV" "$WAN_CIDR" > "$STATE/return-route-owned"
+    fi
+    # 共享 /64 的 NAT66 回包必须回到 LAN，不能依赖会老化的 NDP 主机路由。
+    ip -6 route replace "$WAN_CIDR" dev "$LANDEV" table 40960 metric 4096 || return 1
+    if [ -z "$(ip -6 rule show priority 32000 iif "$DEV" to "$WAN_CIDR" lookup 40960)" ]; then
+        ip -6 rule add priority 32000 iif "$DEV" to "$WAN_CIDR" lookup 40960 || return 1
+    fi
 }
 still_current() {
     expected=$SIGNATURE

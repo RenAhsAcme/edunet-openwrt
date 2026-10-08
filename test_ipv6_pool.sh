@@ -19,7 +19,16 @@ case "$(basename "$0")" in
      *) echo '{"up":true,"l3_device":"br-lan","ipv6-prefix-assignment":[{"address":"fd12:3456:789a::","mask":60}]}' ;;
     esac;;
  ip)
+    printf '%s\n' "$*" >> "$AWP6_BASE/ip-calls"
     case "$*" in
+     '-6 rule show '*)
+       if [ "${AWP6_BUSY:-0}" = 1 ];then echo '32000: foreign rule';
+       elif [ -f "$AWP6_BASE/return-rule" ];then echo '32000: from all to 2001:db8:1:2::/64 iif eth2 lookup 40960';fi;;
+     '-6 rule add '*) touch "$AWP6_BASE/return-rule";;
+     '-6 rule del '*) rm -f "$AWP6_BASE/return-rule";;
+     '-6 route show table '*) [ ! -f "$AWP6_BASE/return-route" ] || echo '2001:db8:1:2::/64 dev br-lan metric 4096';;
+     '-6 route replace '*) touch "$AWP6_BASE/return-route";;
+     '-6 route del '*table*) rm -f "$AWP6_BASE/return-route";;
      '-6 addr add '*) echo "$4" >> "$AWP6_BASE/aliases";;
      '-6 addr del '*) grep -vxF "$4" "$AWP6_BASE/aliases" > "$AWP6_BASE/next" || :;mv "$AWP6_BASE/next" "$AWP6_BASE/aliases";;
      '-o -6 addr show '* )
@@ -58,15 +67,23 @@ grep -q '可验证=3，冲突或未就绪=1' "$base/log"
 test "$(wc -l < "$base/tmp/wan-ipv6-pool-auto/pool")" -eq 2
 test "$(wc -l < "$base/aliases")" -eq 2
 test -f "$base/route"
+test -f "$base/return-route";test -f "$base/return-rule"
+grep -qF 'rule add priority 32000 iif eth2 to 2001:0db8:0001:0002:0000:0000:0000:0000/64 lookup 40960' "$base/ip-calls"
 before=$(sha256sum "$base/tmp/wan-ipv6-pool-auto/pool")
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
 test "$before" = "$(sha256sum "$base/tmp/wan-ipv6-pool-auto/pool")"
-rm "$base/nat" "$base/route"
+rm "$base/nat" "$base/route" "$base/return-route" "$base/return-rule"
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
 test -f "$base/nat";test -f "$base/route"
+test -f "$base/return-route";test -f "$base/return-rule"
 AWP6_FAIL=1 sh ./wan-ipv6-pool-auto refresh >> "$base/stdout" 2>&1 && exit 1
 test ! -s "$base/aliases"
 test ! -f "$base/route";test ! -f "$base/nat"
+test ! -f "$base/return-route";test ! -f "$base/return-rule"
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
 grep -q '等待重试' "$base/log"
+AWP6_BUSY=1 sh ./wan-ipv6-pool-auto refresh >> "$base/stdout" 2>&1 && exit 1
+grep -q '已被占用' "$base/log"
+test ! -s "$base/aliases";test ! -f "$base/route"
+test ! -f "$base/tmp/wan-ipv6-pool-auto/return-route-owned"
 echo 'ipv6 pool: DAD/probe failures/healthy check/NAT+route recovery/rollback/retry checks passed'
