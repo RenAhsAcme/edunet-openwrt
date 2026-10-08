@@ -6,11 +6,12 @@ BASE=${AWP6_BASE:-}
 CONF="$BASE/etc/wan-ipv6-pool-auto.conf"
 STATE="$BASE/tmp/wan-ipv6-pool-auto"
 CALC="$BASE/usr/lib/wan-ip-pool-auto/netcalc6.lua"
-ENABLED=1;WAN_IF=wan6;LAN_IF=lan;POOL_SIZE=500;PARALLEL=8;RETRY_SECONDS=300
+ENABLED=1;WAN_IF=wan6;LAN_IF=lan;POOL_SIZE=254;PARALLEL=8;RETRY_SECONDS=300
 PROBE_URL=https://www.baidu.com/
 [ ! -f "$CONF" ] || . "$CONF"
 umask 077
 mkdir -p "$STATE" || exit 1
+progress() { printf '%s\n' "$1"; }
 log() { logger -p "user.${2:-notice}" -t wan-ipv6-pool-auto "$1"; printf '%s\n' "$1"; }
 field() { printf '%s' "$1" | jsonfilter -e "$2"; }
 snapshot() {
@@ -60,10 +61,12 @@ install_rules() {
     nft -c -f "$STATE/rules.nft" && nft -f "$STATE/rules.nft"
 }
 ensure_route() {
+    route_changed=0
     # 仅为 LAN ULA 提供出口；原 WAN 和代理策略路由不变。
     if ! ip -6 route show default from "$LAN_CIDR" dev "$DEV" | grep -q "via $GW .*metric 4096"; then
         printf '%s %s %s\n' "$DEV" "$LAN_CIDR" "$GW" > "$STATE/route-owned"
         ip -6 route add default from "$LAN_CIDR" via "$GW" dev "$DEV" metric 4096 || return 1
+        route_changed=1
     fi
     if [ ! -f "$STATE/return-route-owned" ]; then
         if [ -n "$(ip -6 route show table 40960 2>/dev/null)" ] || [ -n "$(ip -6 rule show priority 32000)" ]; then
@@ -73,10 +76,15 @@ ensure_route() {
         printf '%s %s %s\n' "$DEV" "$LANDEV" "$WAN_CIDR" > "$STATE/return-route-owned"
     fi
     # 共享 /64 的 NAT66 回包必须回到 LAN，不能依赖会老化的 NDP 主机路由。
-    ip -6 route replace "$WAN_CIDR" dev "$LANDEV" table 40960 metric 4096 || return 1
+    if ! ip -6 route show table 40960 exact "$WAN_CIDR" dev "$LANDEV" | grep -q 'metric 4096'; then
+        ip -6 route replace "$WAN_CIDR" dev "$LANDEV" table 40960 metric 4096 || return 1
+        route_changed=1
+    fi
     if [ -z "$(ip -6 rule show priority 32000 iif "$DEV" to "$WAN_CIDR" lookup 40960)" ]; then
         ip -6 rule add priority 32000 iif "$DEV" to "$WAN_CIDR" lookup 40960 || return 1
+        route_changed=1
     fi
+    [ "$route_changed" -eq 0 ] || log 'IPv6 地址池出口及回程路由已恢复。'
 }
 still_current() {
     expected=$SIGNATURE
@@ -101,7 +109,8 @@ case "$POOL_SIZE" in ''|*[!0-9]*) exit 1;; esac
 [ "$POOL_SIZE" -ge 1 ] && [ "$POOL_SIZE" -le 512 ] || exit 1
 case "$PARALLEL" in 1|2|4|8) ;; *) exit 1;; esac
 case "$RETRY_SECONDS" in ''|*[!0-9]*) exit 1;; esac
-if ! snapshot; then clear_pool;log "IPv6 WAN 未就绪或前缀不支持，维持原 IPv6 配置。$(cat "$STATE/plan-error" 2>/dev/null)" warn;exit 0;fi
+if ! snapshot; then clear_pool;[ -f "$STATE/unavailable" ] || log "IPv6 WAN 未就绪或前缀不支持，维持原 IPv6 配置。$(cat "$STATE/plan-error" 2>/dev/null)" warn;touch "$STATE/unavailable";exit 0;fi
+rm -f "$STATE/unavailable"
 if [ "$mode" = check ] && [ -f "$STATE/active" ] && [ "$(cat "$STATE/signature")" = "$SIGNATURE" ]; then
     ip -o -6 addr show dev "$DEV" | awk '$3=="inet6" && $0 !~ /tentative|dadfailed/ {print $4}' | lua "$CALC" normalize > "$STATE/present"
     missing=0
@@ -109,13 +118,12 @@ if [ "$mode" = check ] && [ -f "$STATE/active" ] && [ "$(cat "$STATE/signature")
     if [ "$missing" -eq 0 ]; then
         if ! nft list table ip6 awp6_auto >/dev/null 2>&1; then install_rules || { clear_pool;exit 1; };log '已恢复 IPv6 地址池 NAT 规则。';fi
         ensure_route || { clear_pool;log 'IPv6 ULA 出口路由恢复失败。' err;exit 1; }
-        log "IPv6 运行正常：WAN=$WAN_CIDR 地址池=$(wc -l < "$STATE/pool")，无需重建。"
         exit 0
     fi
 fi
 if [ "$mode" = check ] && [ -f "$STATE/failed-signature" ] && [ "$(cat "$STATE/failed-signature")" = "$SIGNATURE" ]; then
     remaining=$(( $(cat "$STATE/retry-at") - $(date +%s) ))
-    [ "$remaining" -le 0 ] || { log "IPv6 构建等待重试：$remaining 秒。";exit 0; }
+    [ "$remaining" -le 0 ] || exit 0
 fi
 clear_pool
 rm -f "$STATE"/ok-* "$STATE"/error-*
@@ -141,7 +149,7 @@ if nft list chain inet fw4 openclash_mangle_output_v6 >/dev/null 2>&1; then
     nft get element inet fw4 china_ip6_route "{ $TARGET }" >/dev/null 2>&1 || { log 'IPv6 测试目标未确认直连，停止以避免代理假阳性。' err;exit 1; }
     if nft get element inet fw4 china_ip6_route_pass "{ $TARGET }" >/dev/null 2>&1;then log 'IPv6 测试目标命中代理排除集合，停止。' err;exit 1;fi
 fi
-log "IPv6 原地址检查通过，测试目标=$TARGET；保留证书校验。"
+progress "IPv6 原地址检查通过，测试目标=$TARGET；保留证书校验。"
 phase=生成地址与DAD
 lua "$CALC" generate "$WAN_IP" "$POOL_SIZE" > "$STATE/candidates" || exit 1
 while read -r addr;do
@@ -158,7 +166,7 @@ ip -o -6 addr show dev "$DEV" | awk '$3=="inet6" && $0 !~ /tentative|dadfailed/ 
 : > "$STATE/ready"
 while read -r addr;do grep -qxF "$addr" "$STATE/present" && echo "$addr" >> "$STATE/ready";done < "$STATE/candidates"
 ready=$(wc -l < "$STATE/ready")
-log "IPv6 DAD 完成：可验证=$ready，冲突或未就绪=$((POOL_SIZE-ready))。"
+progress "IPv6 DAD 完成：可验证=$ready，冲突或未就绪=$((POOL_SIZE-ready))。"
 [ "$ready" -gt 0 ] || exit 1
 lua "$CALC" probe "$STATE/ready" "$DEV" > "$STATE/probe.nft" || exit 1
 nft -c -f "$STATE/probe.nft" && nft -f "$STATE/probe.nft" || exit 1
@@ -167,13 +175,13 @@ probe() {
     addr=$1
     if curl -6 --noproxy '*' --connect-to "::[$TARGET]:" --interface "$addr" -fsS -o /dev/null --connect-timeout 3 --max-time 5 "$PROBE_URL" 2> "$STATE/error-$addr";then
         echo "$addr" > "$STATE/ok-$addr";rm -f "$STATE/error-$addr"
-    else log "IPv6 验证失败：$addr；$(cat "$STATE/error-$addr")" warn;fi
+    else progress "IPv6 验证失败：$addr；$(cat "$STATE/error-$addr")";fi
 }
 count=0;tested=0
 collect() {
     for pid in $children;do wait "$pid" || :;done
     children=;tested=$((tested+count));count=0
-    log "IPv6 HTTPS 进度：$tested/$ready，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
+    progress "IPv6 HTTPS 进度：$tested/$ready，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
     still_current
 }
 while read -r addr;do

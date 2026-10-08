@@ -14,6 +14,7 @@ cat > "$base/mock-bin/mock" <<'MOCK'
 case "$(basename "$0")" in
  logger) printf '%s\n' "$*" >> "$AWP6_BASE/log";;
  ubus)
+    [ "${AWP6_DOWN:-0}" != 1 ] || exit 1
     case "$2" in
      *.wan6) echo '{"up":true,"l3_device":"eth2","ipv6-address":[{"address":"2001:db8:1:2::1","mask":64,"preferred":3600}],"route":[{"target":"::","mask":0,"nexthop":"fe80::1"}]}' ;;
      *) echo '{"up":true,"l3_device":"br-lan","ipv6-prefix-assignment":[{"address":"fd12:3456:789a::","mask":60}]}' ;;
@@ -63,27 +64,37 @@ PATH="$base/mock-bin:/usr/sbin:/usr/bin:/sbin:/bin";export PATH
 for name in logger ubus ip nft curl sleep;do test "$(command -v "$name")" = "$base/mock-bin/$name";done
 grep -qF '[ -z "$BASE" ] || PATH="$BASE/mock-bin:$PATH"' ./wan-ipv6-pool-auto
 sh ./wan-ipv6-pool-auto refresh > "$base/stdout"
-grep -q '可验证=3，冲突或未就绪=1' "$base/log"
+grep -q '可验证=3，冲突或未就绪=1' "$base/stdout"
+! grep -q '进度\|IPv6 验证失败' "$base/log"
 test "$(wc -l < "$base/tmp/wan-ipv6-pool-auto/pool")" -eq 2
 test "$(wc -l < "$base/aliases")" -eq 2
 test -f "$base/route"
 test -f "$base/return-route";test -f "$base/return-rule"
 grep -qF 'rule add priority 32000 iif eth2 to 2001:0db8:0001:0002:0000:0000:0000:0000/64 lookup 40960' "$base/ip-calls"
 before=$(sha256sum "$base/tmp/wan-ipv6-pool-auto/pool")
+logs=$(wc -l < "$base/log")
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
 test "$before" = "$(sha256sum "$base/tmp/wan-ipv6-pool-auto/pool")"
+test "$logs" -eq "$(wc -l < "$base/log")"
 rm "$base/nat" "$base/route" "$base/return-route" "$base/return-rule"
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
 test -f "$base/nat";test -f "$base/route"
 test -f "$base/return-route";test -f "$base/return-rule"
+grep -q '路由已恢复' "$base/log"
 AWP6_FAIL=1 sh ./wan-ipv6-pool-auto refresh >> "$base/stdout" 2>&1 && exit 1
 test ! -s "$base/aliases"
 test ! -f "$base/route";test ! -f "$base/nat"
 test ! -f "$base/return-route";test ! -f "$base/return-rule"
+logs=$(wc -l < "$base/log")
 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
-grep -q '等待重试' "$base/log"
+test "$logs" -eq "$(wc -l < "$base/log")"
 AWP6_BUSY=1 sh ./wan-ipv6-pool-auto refresh >> "$base/stdout" 2>&1 && exit 1
 grep -q '已被占用' "$base/log"
 test ! -s "$base/aliases";test ! -f "$base/route"
 test ! -f "$base/tmp/wan-ipv6-pool-auto/return-route-owned"
+AWP6_DOWN=1 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
+logs=$(wc -l < "$base/log")
+AWP6_DOWN=1 sh ./wan-ipv6-pool-auto check >> "$base/stdout"
+test "$logs" -eq "$(wc -l < "$base/log")"
+test "$(grep -c 'WAN 未就绪' "$base/log")" -eq 1
 echo 'ipv6 pool: DAD/probe failures/healthy check/NAT+route recovery/rollback/retry checks passed'

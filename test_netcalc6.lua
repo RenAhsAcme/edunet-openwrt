@@ -15,10 +15,10 @@ fails(function() M.plan('2001:db8::1',56,'fddd::',60) end)
 fails(function() M.plan('2001:db8::1',64,'2001:db8:1::',64) end)
 local serial=0
 local random={read=function() serial=serial+1;return string.char(0,0,0,0,0,0,math.floor(serial/256),serial%256) end}
-local ips=M.candidates('2001:db8:1:2::1',500,random)
-eq(#ips,500)
+local ips=M.candidates('2001:db8:1:2::1',254,random)
+eq(#ips,254)
 eq(ips[1],'2001:0db8:0001:0002:0000:0000:0000:0002')
-eq(ips[500],'2001:0db8:0001:0002:0000:0000:0000:01f5')
+eq(ips[254],'2001:0db8:0001:0002:0000:0000:0000:00ff')
 local seen={};for _,ip in ipairs(ips) do assert(not seen[ip]);seen[ip]=true;eq(M.network(ip,64),'2001:0db8:0001:0002:0000:0000:0000:0000/64') end
 fails(function() M.candidates('2001:db8::1',513,random) end)
 local r=M.rules('pool',{ips[1],ips[2]},'eth2',l,w,'br-lan')

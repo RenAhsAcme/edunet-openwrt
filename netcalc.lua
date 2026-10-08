@@ -34,7 +34,7 @@ function M.plan(ip, prefix, gateway, lan_ip, lan_prefix)
   assert(gw > low and gw < high, 'Gateway is outside usable WAN subnet')
   assert(high < lan_low or low > lan_high, 'WAN and LAN subnets overlap')
   local pool_low, pool_high, pp = low, high, p
-  if p < 23 then pool_low = high-511; pp = 23 end
+  if p < 24 then pool_low = high-255; pp = 24 end
   local addresses = {}
   for n = pool_low+1, pool_high-1 do
     if n ~= own and n ~= gw then addresses[#addresses+1] = M.ip(n) end

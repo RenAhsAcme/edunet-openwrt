@@ -13,6 +13,7 @@ cat > "$base/mock-bin/mock" <<'MOCK'
 case "$(basename "$0")" in
  logger) printf '%s\n' "$*" >> "$AWP_BASE/log";;
  ubus)
+    [ "${AWP_DOWN:-0}" != 1 ] || exit 1
     case "$2" in
       *.wan) echo '{"up":true,"l3_device":"eth2","ipv4-address":[{"address":"10.1.2.2","mask":29}]}' ;;
       *) echo '{"up":true,"ipv4-address":[{"address":"192.168.10.1","mask":24}]}' ;;
@@ -51,20 +52,31 @@ for name in logger ubus ip nft curl ping sleep; do
 done
 grep -qF '[ -z "$BASE" ] || PATH="$BASE/mock-bin:$PATH"' ./wan-ip-pool-auto
 sh ./wan-ip-pool-auto refresh > "$base/stdout"
-grep -q 'ARP 进度：4/4' "$base/log"
-grep -q 'HTTPS 验证失败：10.1.2.5' "$base/log"
-grep -q 'HTTPS 验证完成：4/4，通过=3' "$base/log"
+grep -q 'ARP 进度：4/4' "$base/stdout"
+grep -q 'HTTPS 验证失败：10.1.2.5' "$base/stdout"
+grep -q 'HTTPS 验证完成：4/4，通过=3' "$base/stdout"
+! grep -q '进度\|HTTPS 验证失败' "$base/log"
 grep -q '地址池已启用' "$base/log"
 test "$(wc -l < "$base/tmp/wan-ip-pool-auto/pool")" -eq 3
 before=$(sha256sum "$base/tmp/wan-ip-pool-auto/pool")
+logs=$(wc -l < "$base/log")
 sh ./wan-ip-pool-auto check >> "$base/stdout"
 test "$before" = "$(sha256sum "$base/tmp/wan-ip-pool-auto/pool")"
-grep -q '运行正常' "$base/log"
+test "$logs" -eq "$(wc -l < "$base/log")"
+rm "$base/nat"
+sh ./wan-ip-pool-auto check >> "$base/stdout"
+grep -q '已恢复丢失' "$base/log"
 AWP_FAIL=1 sh ./wan-ip-pool-auto refresh >> "$base/stdout" 2>&1 && exit 1
 grep -q '原 WAN 的 HTTPS 检查失败' "$base/log"
 grep -q '阶段=原WAN连通性检查' "$base/log"
 test ! -f "$base/tmp/wan-ip-pool-auto/active"
 test ! -s "$base/aliases"
+logs=$(wc -l < "$base/log")
 sh ./wan-ip-pool-auto check >> "$base/stdout"
-grep -q '秒后重试' "$base/log"
+test "$logs" -eq "$(wc -l < "$base/log")"
+AWP_DOWN=1 sh ./wan-ip-pool-auto check >> "$base/stdout"
+logs=$(wc -l < "$base/log")
+AWP_DOWN=1 sh ./wan-ip-pool-auto check >> "$base/stdout"
+test "$logs" -eq "$(wc -l < "$base/log")"
+test "$(grep -c 'WAN 未就绪' "$base/log")" -eq 1
 echo 'logging: rebuild/progress/probe failure/healthy check/rollback/retry checks passed'

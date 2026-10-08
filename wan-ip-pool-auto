@@ -16,6 +16,7 @@ PROBE_URL=https://www.baidu.com/; PARALLEL=8; RETRY_SECONDS=300
 [ ! -f "$CONF" ] || . "$CONF"
 umask 077
 mkdir -p "$STATE" || exit 1
+progress() { printf '%s\n' "$1"; }
 log() { logger -p "user.${2:-notice}" -t wan-ip-pool-auto "$1"; printf '%s\n' "$1"; }
 field() { printf '%s' "$1" | jsonfilter -e "$2"; }
 
@@ -95,9 +96,11 @@ for cmd in lua ubus jsonfilter ip nft curl ping awk flock sha256sum; do
 done
 if ! snapshot; then
     clear_pool
-    log "WAN 未就绪或网段不支持，使用原 WAN。$(cat "$STATE/plan-error" 2>/dev/null)" warn
+    [ -f "$STATE/unavailable" ] || log "WAN 未就绪或网段不支持，使用原 WAN。$(cat "$STATE/plan-error" 2>/dev/null)" warn
+    touch "$STATE/unavailable"
     exit 0
 fi
+rm -f "$STATE/unavailable"
 
 if [ "$mode" = check ] && [ -s "$STATE/pool" ] && [ -f "$STATE/signature" ] && [ "$(cat "$STATE/signature")" = "$SIGNATURE" ]; then
     ip -o -4 addr show dev "$DEV" | awk '{print $4}' > "$STATE/present"
@@ -108,13 +111,12 @@ if [ "$mode" = check ] && [ -s "$STATE/pool" ] && [ -f "$STATE/signature" ] && [
             install_rules || { clear_pool; log 'NAT 规则恢复失败，已回退原 WAN。' err; exit 1; }
             log '已恢复丢失的地址池 NAT 规则。'
         fi
-        log "运行正常：WAN=$WAN_IP/$PREFIX 接口=$DEV 地址池=$(wc -l < "$STATE/pool") 个，配置和地址未变化，无需重建。"
         exit 0
     fi
 fi
 if [ "$mode" = check ] && [ -f "$STATE/failed-signature" ] && [ "$(cat "$STATE/failed-signature")" = "$SIGNATURE" ]; then
     remaining=$(( $(cat "$STATE/retry-at") - $(date +%s) ))
-    [ "$remaining" -le 0 ] || { log "上次构建失败，${remaining} 秒后重试；当前使用原 WAN。"; exit 0; }
+    [ "$remaining" -le 0 ] || exit 0
 fi
 
 # A rebuild discards previous discoveries, as requested.
@@ -141,8 +143,8 @@ trap 'exit 130' INT TERM HUP
 log "开始重建：WAN=$WAN_IP/$PREFIX 网关=$GW 接口=$DEV 扫描网段=$POOL_CIDR，旧地址池及发现名单已清理。"
 PROBE_IP=$(curl -4 --noproxy '*' -fsS -o /dev/null --interface "$WAN_IP" --connect-timeout 3 --max-time 5 -w '%{remote_ip}' "$PROBE_URL") || { log '原 WAN 的 HTTPS 检查失败，停止构建。' err; exit 1; }
 case "$PROBE_IP" in ''|*[!0-9.]*) log '测试目标未返回 IPv4 地址，停止构建。' err; exit 1;; esac
-log "测试目标已解析为 $PROBE_IP，本轮验证共用该地址，继续校验 HTTPS 证书。"
-log '原 WAN 的 HTTPS 检查通过，开始 ARP 地址占用检查。'
+progress "测试目标已解析为 $PROBE_IP，本轮验证共用该地址，继续校验 HTTPS 证书。"
+progress '原 WAN 的 HTTPS 检查通过，开始 ARP 地址占用检查。'
 phase=ARP探测
 scanned=0
 total=$(tail -n +2 "$STATE/plan.next" | wc -l)
@@ -166,7 +168,7 @@ collect_batch() {
         fi
     done
     scanned=$((scanned+count))
-    log "ARP 进度：$scanned/$total，候选=$(wc -l < "$STATE/candidates")，跳过=$(wc -l < "$STATE/reserved")。"
+    progress "ARP 进度：$scanned/$total，候选=$(wc -l < "$STATE/candidates")，跳过=$(wc -l < "$STATE/reserved")。"
     batch=
     still_current
 }
@@ -202,14 +204,14 @@ nft -f "$STATE/probe.nft" || exit 1
 phase=HTTPS源地址验证
 tested=0
 probe_total=$(wc -l < "$STATE/owned")
-log "开始 HTTPS 源地址验证：$probe_total 个候选地址，并发=$PARALLEL。"
+progress "开始 HTTPS 源地址验证：$probe_total 个候选地址，并发=$PARALLEL。"
 probe() {
     addr=$1
     if curl -4 --noproxy '*' --connect-to "::$PROBE_IP:" -fsS -o /dev/null --interface "$addr" --connect-timeout 3 --max-time 5 "$PROBE_URL" >/dev/null 2> "$STATE/error-$addr"; then
         echo "$addr" > "$STATE/ok-$addr"
         rm -f "$STATE/error-$addr"
     else
-        log "HTTPS 验证失败：$addr 不加入地址池。$(cat "$STATE/error-$addr")" warn
+        progress "HTTPS 验证失败：$addr 不加入地址池。$(cat "$STATE/error-$addr")"
     fi
 }
 count=0
@@ -219,7 +221,7 @@ while read -r unused addr; do
     if [ "$count" -ge "$PARALLEL" ]; then
         for pid in $children; do wait "$pid" || :; done
         tested=$((tested+count))
-        log "HTTPS 进度：$tested/$probe_total，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
+        progress "HTTPS 进度：$tested/$probe_total，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
         children=; count=0
         still_current || exit 1
     fi
@@ -227,7 +229,7 @@ done < "$STATE/owned"
 for pid in $children; do wait "$pid" || :; done
 children=
 tested=$((tested+count))
-log "HTTPS 验证完成：$tested/$probe_total，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
+progress "HTTPS 验证完成：$tested/$probe_total，通过=$(find "$STATE" -name 'ok-*' | wc -l)。"
 for file in "$STATE"/ok-*; do [ ! -f "$file" ] || cat "$file"; done > "$STATE/pool"
 [ -s "$STATE/pool" ] || { log '没有候选地址通过 HTTPS 检查。' err; exit 1; }
 phase=释放失败地址
