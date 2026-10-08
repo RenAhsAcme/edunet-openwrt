@@ -1,0 +1,9 @@
+#!/bin/sh
+WAN_IF=wan
+LAN_IF=lan
+[ ! -f /etc/wan-ip-pool-auto.conf ] || . /etc/wan-ip-pool-auto.conf
+case "${ACTION:-}" in ifup|ifupdate|ifdown) ;; *) exit 0;; esac
+[ "${INTERFACE:-}" = "$WAN_IF" ] || [ "${INTERFACE:-}" = "$LAN_IF" ] || exit 0
+# Never hold up netifd while probing. Cron catches events received during a rebuild.
+(trap '' HUP; exec /usr/sbin/wan-ip-pool-auto check) </dev/null >/dev/null 2>&1 &
+exit 0

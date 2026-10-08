@@ -1,0 +1,6 @@
+#!/bin/sh
+WAN_IF=wan6;LAN_IF=lan
+[ ! -f /etc/wan-ipv6-pool-auto.conf ] || . /etc/wan-ipv6-pool-auto.conf
+case "${ACTION:-}" in ifup|ifupdate|ifdown) ;; *) exit 0;; esac
+[ "${INTERFACE:-}" = "$WAN_IF" ] || [ "${INTERFACE:-}" = "$LAN_IF" ] || exit 0
+(trap '' HUP;exec /usr/sbin/wan-ipv6-pool-auto check) </dev/null >/dev/null 2>&1 &

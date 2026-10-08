@@ -1,0 +1,27 @@
+# 实现流程
+
+## IPv4
+
+1. 从 ubus 和路由读取 WAN、LAN、网关，由 `netcalc.lua` 校验私有子网、排除重叠并选择最后 `/23`，输出候选列表。
+2. `wan-ip-pool-auto` 以文件锁串行管理生命周期。重建时清理旧池，按批次进行 ARP 发现，排除本机和响应或状态不明确的候选。
+3. 原 WAN HTTPS 请求先确认出网并取得目标 IPv4。后续所有候选绑定源地址，使用 curl `--connect-to` 连接该目标，仍保留原 URL 域名、TLS SNI 与证书验证，减少重复 DNS 查询带来的假失败。
+4. 临时 `ip awp_probe` 在 NAT 优先级 98 做同源 SNAT，锁定测试源地址，防止后面的 masquerade 把请求改成原 WAN 而误判通过。
+5. 只保留成功的运行时别名，`nftcalc.lua` 生成 `ip awp_auto`，优先级 99，用 `numgen random mod N` 映射源地址。匹配 LAN IPv4 出口且目的不在 WAN 子网的新连接。
+
+IPv4 仍保留上游 Lua 的旧 iptables 规则生成函数用于历史兼容和单元测试；当前运行引擎只调用 nftables 生成器。
+
+## IPv6
+
+`netcalc6.lua` 解析并规范化地址，使用 `/dev/urandom` 生成 IID，清除 IID 的 universal/local 位，排除原 WAN、零 IID 和本轮重复值。候选作为 `/128` 临时添加到 WAN 设备，等待内核 DAD；`dadfailed` 或等待后仍 `tentative` 的地址不进入 HTTPS 测试。
+
+HTTPS 同样预解析一次目标、绑定源地址并用 `ip6 awp6_probe` 锁定测试源。通过者组成 `ip6 awp6_auto` 映射。规则限定 LAN 入接口，覆盖 LAN ULA 和同 WAN `/64` 的直通 LAN 全球地址，排除 WAN 子网目的。
+
+LAN ULA 额外使用一条 metric 4096 的源默认路由通往已有 WAN 链路本地网关；引擎记录并只清理自己拥有的路由。原 WAN 全球地址的默认路由保留。
+
+## 生命周期与消费方式
+
+hotplug 在接口事件后触发检查，cron 每分钟补偿。配置签名和临时池状态判断是否需要重建；健康轮询不会重新抽样。防火墙表消失时恢复规则。失败或构建中断清理项目拥有的状态，保留原 WAN，默认五分钟重试；新 WAN 配置可立即重试。
+
+NAT 由内核 conntrack 按连接维持映射，所以连接内的后续数据包继续使用同一源地址。代理进程在路由器本机重新发起的连接不属于 LAN 转发规则覆盖范围。
+
+配置文件由 root 拥有、权限 0600，以 shell 配置加载，是可信代码，不接受非可信用户写入。候选规模限制与批次探测控制开销，但不能保证所有低内存设备都承受约 500 个地址。

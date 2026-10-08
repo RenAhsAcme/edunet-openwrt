@@ -1,0 +1,21 @@
+name: Source checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - name: Shell syntax
+        run: |
+          for file in *.sh wan-ip-pool-auto wan-ipv6-pool-auto hotplug-iface hotplug-iface6; do
+            sh -n "$file" || exit 1
+          done
+      - name: Lua address tests
+        run: |
+          lua5.1 test_netcalc.lua
+          lua5.1 test_netcalc6.lua
